@@ -1,0 +1,404 @@
+# -*- coding: utf-8 -*-
+"""
+ربات فروش VPN تلگرام - نسخه ساده با تأیید دستی کارت‌به‌کارت
+نیازمند: python-telegram-bot نسخه 20 یا جدیدتر
+
+قبل از اجرا، مقادیر BOT_TOKEN، CARD_NUMBER، CARDHOLDER_NAME و ADMIN_ID را تنظیم کنید.
+رسیدها و سفارش‌ها در فایل orders.json ذخیره می‌شوند.
+"""
+
+import json
+import logging
+import os
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+# ========== تنظیمات اصلی: این مقادیر را وارد کنید ==========
+BOT_TOKEN = ""
+CARD_NUMBER = ""
+CARDHOLDER_NAME = "مخفی"
+ADMIN_ID = 
+# ==========================================================
+
+DATA_FILE = Path(__file__).with_name("orders.json")
+PACKAGES = {
+    "10": ("۱۰ گیگابایت", 85000),
+    "20": ("۲۰ گیگابایت", 150000),
+    "30": ("۳۰ گیگابایت", 235000),
+    "40": ("۴۰ گیگابایت", 320000),
+    "50": ("۵۰ گیگابایت", 405000),
+    "100": ("۱۰۰ گیگابایت", 820000),
+}
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
+
+
+def load_orders() -> list[dict[str, Any]]:
+    if not DATA_FILE.exists():
+        return []
+    try:
+        with DATA_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        logger.exception("خواندن orders.json ناموفق بود.")
+        return []
+
+
+def save_orders(orders: list[dict[str, Any]]) -> None:
+    temp_file = DATA_FILE.with_suffix(".json.tmp")
+    with temp_file.open("w", encoding="utf-8") as f:
+        json.dump(orders, f, ensure_ascii=False, indent=2)
+    temp_file.replace(DATA_FILE)
+
+
+def main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛒 خرید VPN", callback_data="buy")],
+        [InlineKeyboardButton("📋 سفارش‌های من", callback_data="orders")],
+        [InlineKeyboardButton("📞 پشتیبانی", callback_data="support")],
+    ])
+
+
+def packages_menu() -> InlineKeyboardMarkup:
+    rows = []
+    for key, (name, price) in PACKAGES.items():
+        rows.append([InlineKeyboardButton(
+            f"{name} — {price:,} تومان", callback_data=f"plan_{key}"
+        )])
+    rows.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def order_buttons(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 بازگشت به بسته‌ها", callback_data="buy")],
+        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="home")],
+    ])
+
+
+def find_order(orders: list[dict[str, Any]], order_id: str) -> dict[str, Any] | None:
+    return next((o for o in orders if o.get("id") == order_id), None)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(
+            "سلام رفیق! 👋\n\nبه ربات فروش VPN خوش آمدی.\n"
+            "از منوی زیر یکی از گزینه‌ها را انتخاب کن:",
+            reply_markup=main_menu(),
+        )
+
+
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    user = query.from_user
+
+    if query.data == "home":
+        await query.message.reply_text("🏠 منوی اصلی:", reply_markup=main_menu())
+
+    elif query.data == "buy":
+        await query.message.reply_text(
+            "📦 بسته حجمی یک‌ماهه را انتخاب کن:",
+            reply_markup=packages_menu(),
+        )
+
+    elif query.data == "orders":
+        orders = load_orders()
+        mine = [o for o in orders if o.get("user_id") == user.id]
+        if not mine:
+            text = "📋 هنوز سفارشی برای حساب شما ثبت نشده است."
+        else:
+            lines = ["📋 سفارش‌های شما:"]
+            for o in mine[-10:][::-1]:
+                lines.append(
+                    f"\n🧾 کد: {o['id']}\n"
+                    f"📦 بسته: {o['package']}\n"
+                    f"💰 مبلغ: {o['price']:,} تومان\n"
+                    f"📌 وضعیت: {o['status']}"
+                )
+                if o.get("config"):
+                    lines.append(f"🔐 کانفیگ:\n{o['config']}")
+            text = "\n".join(lines)
+        await query.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 منوی اصلی", callback_data="home")]
+            ]),
+        )
+
+    elif query.data == "support":
+        await query.message.reply_text(
+            "📞 پشتیبانی\n\nبرای پیگیری، کد سفارش را برای مدیر ربات ارسال کن.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 منوی اصلی", callback_data="home")]
+            ]),
+        )
+
+    elif query.data.startswith("plan_"):
+        key = query.data.removeprefix("plan_")
+        if key not in PACKAGES:
+            await query.message.reply_text("این بسته معتبر نیست.")
+            return
+
+        name, price = PACKAGES[key]
+        order_id = uuid.uuid4().hex[:8].upper()
+        order = {
+            "id": order_id,
+            "user_id": user.id,
+            "username": user.username or "",
+            "full_name": user.full_name,
+            "package_key": key,
+            "package": name,
+            "price": price,
+            "status": "در انتظار پرداخت و ارسال رسید",
+            "receipt_file_id": None,
+            "config": None,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        orders = load_orders()
+        orders.append(order)
+        save_orders(orders)
+
+        context.user_data["awaiting_receipt_for"] = order_id
+        await query.message.reply_text(
+            "🧾 پیش‌فاکتور خرید\n\n"
+            f"🔖 کد سفارش: {order_id}\n"
+            f"📦 بسته: {name}\n"
+            "⏳ اعتبار: یک ماه\n"
+            f"💰 مبلغ: {price:,} تومان\n\n"
+            "💳 اطلاعات کارت‌به‌کارت:\n"
+            f"شماره کارت: {CARD_NUMBER}\n"
+            f"به نام: {CARDHOLDER_NAME}\n\n"
+            "پس از واریز، تصویر رسید را همین‌جا به صورت عکس ارسال کن.\n"
+            "پرداخت فقط پس از بررسی دستی مدیر تأیید می‌شود؛ "
+            "ارسال رسید به‌تنهایی به معنی تأیید پرداخت نیست.",
+            reply_markup=order_buttons(order_id),
+        )
+
+
+async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if not message or not message.photo:
+        return
+
+    order_id = context.user_data.get("awaiting_receipt_for")
+    if not order_id:
+        await message.reply_text(
+            "برای ارسال رسید، ابتدا از منوی خرید یک بسته انتخاب کن."
+        )
+        return
+
+    orders = load_orders()
+    order = find_order(orders, order_id)
+    if not order or order.get("user_id") != message.from_user.id:
+        context.user_data.pop("awaiting_receipt_for", None)
+        await message.reply_text("سفارش پیدا نشد. لطفاً دوباره از منوی خرید شروع کن.")
+        return
+
+    if order.get("status") != "در انتظار پرداخت و ارسال رسید":
+        await message.reply_text("این سفارش در وضعیت ارسال رسید نیست.")
+        return
+
+    photo = message.photo[-1]
+    order["receipt_file_id"] = photo.file_id
+    order["status"] = "رسید ارسال شده؛ در انتظار بررسی مدیر"
+    save_orders(orders)
+    context.user_data.pop("awaiting_receipt_for", None)
+
+    await message.reply_text(
+        f"✅ رسید برای سفارش {order_id} دریافت شد.\n"
+        "وضعیت: در انتظار بررسی دستی مدیر.\n"
+        "تا زمان تأیید مدیر، پرداخت تأییدشده محسوب نمی‌شود."
+    )
+
+    caption = (
+        f"🧾 رسید پرداخت جدید\n"
+        f"کد سفارش: {order_id}\n"
+        f"مشتری: {order.get('full_name', '')}\n"
+        f"نام کاربری: @{order.get('username') or 'ندارد'}\n"
+        f"شناسه کاربر: {order['user_id']}\n"
+        f"بسته: {order['package']}\n"
+        f"مبلغ: {order['price']:,} تومان\n"
+        "وضعیت: در انتظار بررسی دستی"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ تأیید پرداخت", callback_data=f"admin_approve_{order_id}"),
+            InlineKeyboardButton("❌ رد پرداخت", callback_data=f"admin_reject_{order_id}"),
+        ]
+    ])
+    try:
+        await context.bot.send_photo(
+            chat_id=ADMIN_ID,
+            photo=photo.file_id,
+            caption=caption,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        logger.exception("ارسال رسید به مدیر ناموفق بود.")
+        await message.reply_text(
+            "رسید ذخیره شد، اما ارسال آن برای مدیر ناموفق بود. "
+            "شناسه مدیر و اینکه مدیر قبلاً ربات را Start کرده باشد بررسی شود."
+        )
+
+
+async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("این دکمه فقط برای مدیر است.", show_alert=True)
+        return
+
+    await query.answer()
+    data = query.data or ""
+    action = "approve" if data.startswith("admin_approve_") else "reject"
+    order_id = data.removeprefix(f"admin_{action}_")
+
+    orders = load_orders()
+    order = find_order(orders, order_id)
+    if not order:
+        await query.message.reply_text("سفارش پیدا نشد.")
+        return
+
+    if action == "approve":
+        if order["status"] == "پرداخت تأیید شد؛ منتظر ارسال کانفیگ":
+            await query.message.reply_text("این پرداخت قبلاً تأیید شده است.")
+            return
+        if order["status"] == "پرداخت رد شد":
+            await query.message.reply_text("این سفارش قبلاً رد شده است.")
+            return
+        order["status"] = "پرداخت تأیید شد؛ منتظر ارسال کانفیگ"
+        save_orders(orders)
+        await context.bot.send_message(
+            chat_id=order["user_id"],
+            text=(
+                f"✅ پرداخت سفارش {order_id} توسط مدیر تأیید شد.\n"
+                "کانفیگ هنوز ارسال نشده است و باید جداگانه توسط مدیر ارسال شود."
+            ),
+        )
+        await query.message.reply_text(f"پرداخت سفارش {order_id} تأیید شد.")
+    else:
+        if order["status"] == "پرداخت تأیید شد؛ منتظر ارسال کانفیگ":
+            await query.message.reply_text(
+                "این پرداخت قبلاً تأیید شده؛ برای تغییر وضعیت، سفارش را دستی بررسی کن."
+            )
+            return
+        order["status"] = "پرداخت رد شد"
+        save_orders(orders)
+        await context.bot.send_message(
+            chat_id=order["user_id"],
+            text=(
+                f"❌ پرداخت سفارش {order_id} تأیید نشد.\n"
+                "لطفاً با پشتیبانی تماس بگیر یا پس از بررسی، رسید صحیح ارسال کن."
+            ),
+        )
+        await query.message.reply_text(f"پرداخت سفارش {order_id} رد شد.")
+
+
+async def send_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """مدیر: /sendconfig ORDER_ID کانفیگ"""
+    message = update.message
+    if not message:
+        return
+    if message.from_user.id != ADMIN_ID:
+        await message.reply_text("این دستور فقط برای مدیر فعال است.")
+        return
+    if len(context.args) < 2:
+        await message.reply_text(
+            "روش استفاده:\n/sendconfig کد_سفارش کانفیگ_معتبر\n\n"
+            "مثال:\n/sendconfig A1B2C3D4 کانفیگ_نمونه\n"
+            "به‌جای متن نمونه، کانفیگ واقعی و معتبر مشتری را قرار بده."
+        )
+        return
+
+    order_id = context.args[0].strip().upper()
+    config_text = " ".join(context.args[1:]).strip()
+    orders = load_orders()
+    order = find_order(orders, order_id)
+    if not order:
+        await message.reply_text("سفارش با این کد پیدا نشد.")
+        return
+    if order["status"] != "پرداخت تأیید شد؛ منتظر ارسال کانفیگ":
+        await message.reply_text(
+            "ابتدا باید پرداخت این سفارش را دستی تأیید کرده باشی."
+        )
+        return
+
+    try:
+        await context.bot.send_message(
+            chat_id=order["user_id"],
+            text=f"🎉 کانفیگ سفارش {order_id}\n\n{config_text}\n\n"
+                 "این کانفیگ را فقط در برنامه سازگار با سرویس خودت وارد کن.",
+        )
+    except Exception:
+        logger.exception("ارسال کانفیگ به مشتری ناموفق بود.")
+        await message.reply_text(
+            "ارسال کانفیگ ناموفق بود. مطمئن شو مشتری قبلاً ربات را Start کرده باشد."
+        )
+        return
+
+    order["config"] = config_text
+    order["status"] = "تکمیل شد؛ کانفیگ ارسال شد"
+    save_orders(orders)
+    await message.reply_text(f"✅ کانفیگ سفارش {order_id} برای مشتری ارسال شد.")
+
+
+async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user and update.message:
+        await update.message.reply_text(
+            f"شناسه عددی تلگرام شما:\n{update.effective_user.id}\n\n"
+            "اگر مدیر ربات هستی، این عدد را در متغیر ADMIN_ID قرار بده."
+        )
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("خطای مدیریت‌نشده هنگام پردازش به‌روزرسانی:", exc_info=context.error)
+
+
+def main() -> None:
+    if BOT_TOKEN == "توکن_ربات_را_اینجا_قرار_دهید" or not BOT_TOKEN.strip():
+        raise SystemExit("ابتدا BOT_TOKEN را در ابتدای فایل تنظیم کن.")
+    if ADMIN_ID == 123456789:
+        logger.warning("ADMIN_ID هنوز مقدار نمونه است؛ /myid را برای یافتن شناسه اجرا کن.")
+
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("myid", myid))
+    app.add_handler(CommandHandler("sendconfig", send_config))
+    app.add_handler(CallbackQueryHandler(admin_callbacks, pattern=r"^admin_(approve|reject)_"))
+    app.add_handler(CallbackQueryHandler(buttons))
+    app.add_handler(MessageHandler(filters.PHOTO, receipt_handler))
+    app.add_error_handler(error_handler)
+
+    print("ربات روشن شد! برای توقف Ctrl+C را بزن.")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
